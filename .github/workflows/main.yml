@@ -1,0 +1,104 @@
+name: Build .deb
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-deb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build asusctl .deb
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ca-certificates \
+              git \
+              build-essential \
+              pkg-config \
+              cmake \
+              gettext \
+              rustc \
+              cargo \
+              libudev-dev \
+              libusb-1.0-0-dev \
+              libclang-dev \
+              libsdl2-dev \
+              libfontconfig-dev
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build release binaries and stage files
+        run: |
+          make build
+          mkdir -p /tmp/pkg/DEBIAN
+          make DESTDIR=/tmp/pkg prefix=/usr install
+
+      - name: Create .deb metadata and package
+        run: |
+          VERSION=$(grep -m1 'version = ' Cargo.toml | cut -d '"' -f2)
+          VERSION=${VERSION:-6.1.0}
+
+          ARCH=$(dpkg --print-architecture)
+          DEB_VERSION="${VERSION}-git.$(git rev-parse --short HEAD)"
+          DEB_FILE="asusctl_${DEB_VERSION}_${ARCH}.deb"
+
+          printf '%s\n' \
+            "Package: asusctl" \
+            "Version: ${DEB_VERSION}" \
+            "Section: utils" \
+            "Priority: optional" \
+            "Architecture: ${ARCH}" \
+            "Depends: libudev1, libusb-1.0-0, libsdl2-2.0-0, libfontconfig1, systemd" \
+            "Maintainer: Local Build <noreply@github.com>" \
+            "Description: Control daemon, CLI, and ROG Control Center for ASUS laptops" \
+            > /tmp/pkg/DEBIAN/control
+
+          dpkg-deb --build --root-owner-group /tmp/pkg "$DEB_FILE"
+
+          echo "DEB_VERSION=${DEB_VERSION}" >> "$GITHUB_ENV"
+          echo "DEB_FILE=${DEB_FILE}" >> "$GITHUB_ENV"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: asusctl-ubuntu-deb
+          path: "*.deb"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${DEB_VERSION}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating its .deb asset."
+            gh release upload "$TAG" "$DEB_FILE" --clobber
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" "$DEB_FILE" \
+              --target "$GITHUB_SHA" \
+              --title "asusctl ${DEB_VERSION}" \
+              --generate-notes
+          fi
